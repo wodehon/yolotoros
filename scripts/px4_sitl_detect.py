@@ -9,6 +9,7 @@ import message_filters
 from sensor_msgs.msg import Image, CameraInfo
 from vision_msgs.msg import Detection2DArray, ObjectHypothesisWithPose, Detection2D
 from geometry_msgs.msg import Pose, PoseStamped
+from std_msgs.msg import Bool
 import tf
 import tf2_ros
 import yaml
@@ -56,12 +57,19 @@ class yolo_detect():
         self.result_msg = Detection2DArray()
         self.pos_pub = rospy.Publisher('/yolov5/pose', Pose, queue_size = 1)
         self.pos_msg = Pose()
-        rospy.Timer(rospy.Duration(0.05), self.posetcb)
+
+        rospy.Timer(rospy.Duration(0.1), self.posetcb)
+        # change 
+        # rospy.Timer(rospy.Duration(0.05), self.posetcb)
+
         self.pose_pub = rospy.Publisher('/move_base_simple/goal', PoseStamped, queue_size = 1)
         self.pose_msg = PoseStamped() # 发送到planning
         self.trigger = False
+        self.tri_pub = rospy.Publisher('/insulator_pub_flag', Bool, queue_size = 1)
+        self.tri_msg = Bool()
+        self.tri_msg.data = False # false表示tower pub，true表示insulator pub
 
-        self.MAX_Z = 30
+        self.MAX_Z = 70
         
         self.bridge = CvBridge() #OpenCV与ROS的消息转换类
 
@@ -70,6 +78,7 @@ class yolo_detect():
             print("-------pub success!------")
             # print("------------")
             self.pose_pub.publish(self.pose_msg)
+        self.tri_pub.publish(self.tri_msg)
 
 
     def camera_info_callback(self, msg):
@@ -82,7 +91,7 @@ class yolo_detect():
         self.camera_info['R'] = msg.R
         self.camera_info['roi'] = msg.roi
 
-        # self.camera_info_sub.destroy()
+        self.camera_info_sub.destroy()
 
     # def detectimg(self, img):
     #     frame = self.bridge.imgmsg_to_cv2(img, desired_encoding='bgr8')
@@ -92,6 +101,7 @@ class yolo_detect():
     #     self.img_pub.publish(self.bridge.cv2_to_imgmsg(image_detect, "bgr8"))
 
     def detectimg(self, img, img_depth, cam_pose):
+        time1 = rospy.Time.now()
         frame = self.bridge.imgmsg_to_cv2(img, desired_encoding='bgr8')
         frame_depth = self.bridge.imgmsg_to_cv2(img_depth, desired_encoding='16UC1')
         # print(frame_depth.shape)
@@ -103,10 +113,10 @@ class yolo_detect():
         trans[1] = cam_pose.pose.position.y
         trans[2] = cam_pose.pose.position.z
         quat = [0,0,0,0]
-        quat[0] = cam_pose.pose.orientation.x
-        quat[1] = cam_pose.pose.orientation.y
-        quat[2] = cam_pose.pose.orientation.z
-        quat[3] = cam_pose.pose.orientation.w
+        quat[0] = cam_pose.pose.orientation.w
+        quat[1] = cam_pose.pose.orientation.x
+        quat[2] = cam_pose.pose.orientation.y
+        quat[3] = cam_pose.pose.orientation.z
         
         # print(result[0][1]) 直接打印box
         # 发送到result
@@ -153,7 +163,7 @@ class yolo_detect():
                 depth_ = self.MAX_Z
             if id == "tower":
                 depth_ = self.MAX_Z
-            scale = 1    # 真实为0.001
+            scale = 1    # 真实相机为0.001
             obj_pose.pose.pose.position.x = world_x * depth_ * scale
             obj_pose.pose.pose.position.y = world_y * depth_ * scale
             obj_pose.pose.pose.position.z =  depth_ * scale   #2D相机则显示,归一化后的结果,用户用时自行乘上深度z获取正确xy
@@ -163,8 +173,10 @@ class yolo_detect():
 
             pointxyz = [obj_pose.pose.pose.position.x, obj_pose.pose.pose.position.y, obj_pose.pose.pose.position.z]
             # print("-----------")
-            print(pointxyz)
+            # print(pointxyz)
             point_ = cal(pointxyz, trans, quat)
+            if(abs(pointxyz[0]) > 40 or abs(pointxyz[2]) > 40 or abs(pointxyz[3]) > 30):
+                point_ = trunc(point_, trans)
             self.pos_msg.position.x = point_[0]
             self.pos_msg.position.y = point_[1]
             self.pos_msg.position.z = point_[2]
@@ -175,10 +187,13 @@ class yolo_detect():
             if name == "tower" and obj_pose.score > 0.7:
                 self.trigger = True
                 self.pose_msg.pose.position.x = point_[0]
-                self.pose_msg.pose.position.y = point_[0]
-                self.pose_msg.pose.position.z = point_[0]
+                self.pose_msg.pose.position.y = point_[1]
+                self.pose_msg.pose.position.z = point_[2]
+            
             # self.pose_pub.publish(self.pose_msg)
 
+        time2 = rospy.Time.now()
+        print("------coss " + str(time2.to_sec() - time1.to_sec()) + " s-------")
 
         self.img_pub.publish(self.bridge.cv2_to_imgmsg(image_detect, "bgr8"))
         self.res_pub.publish(self.result_msg)
@@ -188,8 +203,10 @@ class yolo_detect():
 def quattorot(quat_):
     # return tf.transformations.quaternion_matrix(quat_)
     q = quat_.copy()
+    q /= np.linalg.norm(q)
     n = np.dot(q, q)
     if n < np.finfo(q.dtype).eps:
+        print("error")
         return np.identity(3)
     q = q * np.sqrt(2.0 / n)
     q = np.outer(q, q)
@@ -207,16 +224,70 @@ def quattorot(quat_):
     return rot_matrix
 
 
+def quat_rot(quat_):
+    q = np.quaternoion
+
+
 def cal(point, trans_, quat_):
     # get_tf = False
     # while not get_tf:
     # (trans,quat) = listener.lookupTransform('/turtle2', '/turtle1', rospy.Time(0))
     rot = quattorot(np.array(quat_))
     # print(rot.shape)
-    point_ = np.dot(point, rot) + np.array(trans_)
+    # point_ = np.dot(point, rot) + np.array(trans_)
+    point_ = np.dot(point, np.transpose(rot)) + np.array(trans_)
+    point_ = camtobody(point_)
 
     return point_
 
+def trunc(point, trans_):
+    range_x = 40.0
+    range_y = 40.0
+    range_z = 30.0 - 0.1
+
+    i_ = point[0] - trans_[0]
+    j_ = point[1] - trans_[1]
+    k_ = point[2] - trans_[2]
+    if i_ != 0:
+        ti = (np.sign(i_) * range_x - trans_[0]) / i_
+    elif i_ == 0:
+        ti = float('inf')
+    if j_ != 0:
+        tj = (np.sign(j_) * range_y - trans_[1]) / j_
+    elif j_ == 0:
+        tj = float('inf')
+    if k_ > 0:
+        tk = (range_z - trans_[2]) / k_
+    elif k_ <0:
+        tk = (0.0 - trans_[2]) / k_
+    elif k_ == 0:
+        tk = float('inf')
+    t_ = [ti,tj,tk]
+    t = np.min(t_)
+    x_ = trans_[0] + t * i_
+    y_ = trans_[1] + t * j_
+    z_ = trans_[2] + t * k_
+
+    return [x_,y_,z_]
+
+# camera to FRD
+def camtobody(point_):
+    point = point_
+    # 1.FRD（就是px4）
+    # cam2body_ = np.array(
+    # [[0,0,1],
+    #  [1,0,0],
+    #  [0,1,0]],
+    # dtype=3)
+    # 2.FLU（就是ROS的，或者MAVROS的）
+    cam2body_ = np.array(
+    [[0,0,1],
+     [-1,0,0],
+     [0,-1,0]],
+    dtype=3)
+    point = np.dot(point, np.transpose(cam2body_)) + np.array([-0.02,0,0])# 使用的是行向量，所以用了转置
+
+    return point
 
 
 if __name__ == '__main__':

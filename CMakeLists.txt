@@ -170,6 +170,7 @@ include_directories(
 catkin_install_python(PROGRAMS
   scripts/video_detect.py
   scripts/px4_sitl_detect.py
+  scripts/px4_detect.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

@@ -9,7 +9,7 @@ import message_filters
 from sensor_msgs.msg import Image, CameraInfo
 from vision_msgs.msg import Detection2DArray, ObjectHypothesisWithPose, Detection2D
 from geometry_msgs.msg import Pose, PoseStamped
-from std_msgs.msg import Bool, Int8
+from std_msgs.msg import Bool, Int8, Float32MultiArray
 import tf
 import tf2_ros
 import yaml
@@ -29,6 +29,8 @@ from cv_tool import px2xy
 
 class yolo_detect():
     def __init__(self):
+        self.bridge = CvBridge() #OpenCV与ROS的消息转换类
+        # self.bridge = CvBridge()
         self.yolo = detect_test.detectapi(weights = '/home/duan/Code/my_yolo5/runs/train/exp30/weights/best.pt')
         # self.im_sub = rospy.Subscriber('/camera/rgb/image_raw', Image, self.detectimg)
         
@@ -72,20 +74,29 @@ class yolo_detect():
         self.tuning_pub = rospy.Publisher('/yolov5/tuning', Int8, queue_size = 1)
         self.tuning_msg = Int8()
         self.tuning_msg.data = 0
+        self.error_pub = rospy.Publisher('/yolov5/error', Float32MultiArray, queue_size = 1)
+        self.error = Float32MultiArray()
+        self.error.data = [0,0] 
+        self.discover_pub = rospy.Publisher('/discover', Bool, queue_size = 1)
+        self.hover_pub = rospy.Publisher('/reach', Bool, queue_size = 1)
 
         self.MAX_Z = 70
         self.depth_min = 70 # 初始值
         self.count = 0
         self.triggertest = False
         
-        self.bridge = CvBridge() #OpenCV与ROS的消息转换类
+        # self.bridge = CvBridge() #OpenCV与ROS的消息转换类
+
+        self.dicover = False
+        self.reach = False
 
     def posetcb(self, event):
         # if self.trigger:
             # print("-------pub success!------")
             # # print("------------")
             # self.pose_pub.publish(self.pose_msg)
-        self.tri_pub.publish(self.tri_msg)
+        self.tri_pub.publish(self.tri_msg) 
+        
 
 
     def camera_info_callback(self, msg):
@@ -116,7 +127,7 @@ class yolo_detect():
         # print(frame_depth.shape)
         result, names = self.yolo.detect([frame])
         image_detect = result[0][0]
-        planning = []
+        # planning = []
 
         trans = [0,0,0]
         trans[0] = cam_pose.pose.position.x
@@ -139,6 +150,11 @@ class yolo_detect():
         self.wh_prev = 0 # 宽高比
         self.wh_real = 14
         self.distance = 2 # 安全距离
+        
+        if not result[0][1]:
+            self.dicover = True
+        else:
+            self.dicover = False
         
         # self.pos_msg.position.clear()
         for i in result[0][1]:
@@ -191,8 +207,8 @@ class yolo_detect():
             world_y = 0
             world_x, world_y = px2xy(point, self.camera_info["K"], self.camera_info["D"], 1)
             depth_ = frame_depth[int(center_y),int(center_x)]
-            # if depth_ == 0: # 无效深度(设置最大值)
-            #     depth_ = self.MAX_Z
+            if depth_ == 0: # 无效深度(设置最大值)
+                depth_ = self.MAX_Z
             # if id == "tower": # 如果是电塔，则以最远为目标点
             #     depth_ = self.MAX_Z
             scale = 1    # 真实相机为0.001
@@ -200,8 +216,9 @@ class yolo_detect():
             obj_pose.pose.pose.position.y = world_y * depth_ * scale
             obj_pose.pose.pose.position.z =  depth_ * scale   #2D相机则显示,归一化后的结果,用户用时自行乘上深度z获取正确xy
             # print(obj_pose)
+            
 
-            planning.append([name,float(i[2]),center_x,center_y,float(x2-x1),float(y2-y1),depth_, world_x, world_y])
+            # planning.append([name,float(i[2]),center_x,center_y,float(x2-x1),float(y2-y1),depth_, world_x, world_y])
             
             detection2d.results.append(obj_pose)
             self.result_msg.detections.append(detection2d)
@@ -217,23 +234,19 @@ class yolo_detect():
             pointxyz = [obj_pose.pose.pose.position.x, obj_pose.pose.pose.position.y, obj_pose.pose.pose.position.z]
             # print("-----------")
             # print(pointxyz)
-            if name == "insulator":
-                print("-----------")
-                print(point, depth_, self.depth_min)
+            # if name == "insulator":
+            #     print("-----------")
+            #     print(point, depth_, self.depth_min)
             
 
             # 在每次yolo的过程中进行规划
             if name == "tower" and obj_pose.score > 0.6 and (not self.trigger):
-                # self.trigger = False
-                # point_ = cal(pointxyz, trans, quat)
-                # if(abs(point_[0]) > 40 or abs(point_[1]) > 40 or abs(point_[2]) > 30):
-                #     point_ = trunc(point_, trans)
-                # self.pos_msg.position.x = point_[0]
-                # self.pos_msg.position.y = point_[1]
-                # self.pos_msg.position.z = point_[2]
-                # self.pose_msg.pose.position.x = point_[0]
-                # self.pose_msg.pose.position.y = point_[1]
-                # self.pose_msg.pose.position.z = point_[2]
+                self.error.data[0] = (x/2 - center_x) / x
+                self.discover_pub.publish(self.dicover and self.triggertest)
+                time2 = rospy.Time.now()
+                self.error.data[1] = time2.to_sec() - time1.to_sec()
+                self.error_pub.publish(self.error)
+                #——————原始部分
                 if not self.triggertest:
                     if center_x < x/2 and self.tuning_msg.data != -1:
                         self.tuning_msg.data = 1
@@ -266,7 +279,8 @@ class yolo_detect():
                     self.pose_msg.pose.orientation.w = yaw
 
                     self.pose_pub.publish(self.pose_msg)
-            elif name == "insulator" and obj_pose.score > 0.6 and depth_ > 2 and depth_ < 10 and depth_ < self.depth_min: # 6m开始切换adjust,且以最近的那个为目标
+                    #——————原始部分
+            if name == "insulator" and obj_pose.score > 0.6 and depth_ > 2 and depth_ < 10 and depth_ < self.depth_min: # 6m开始切换adjust,且以最近的那个为目标
                 self.trigger = True
                 self.tri_msg.data = self.trigger
                 self.depth_min = depth_
@@ -309,6 +323,14 @@ class yolo_detect():
                     self.pose_msg.pose.position.x = 19.5
                     self.pose_msg.pose.position.y = 10
                     self.pose_msg.pose.position.z = 12.8
+                    self.reach = True
+                self.error.data[0] = (x/2 - center_x) / x
+                self.discover_pub.publish(self.dicover and self.triggertest)
+                time2 = rospy.Time.now()
+                self.error.data[1] = time2.to_sec() - time1.to_sec()
+                self.error_pub.publish(self.error)
+            if self.reach:
+                self.hover_pub.publish(self.reach)
                 
 
         if self.trigger:
@@ -316,160 +338,18 @@ class yolo_detect():
             print(self.pose_msg.pose.orientation)
             self.pose_pub.publish(self.pose_msg)
             self.tri_pub.publish(self.tri_msg)
-
-
-        # # 完成后再规划
-        # count = 0
-        # max_x = [-1,-2,-3,-4]
-        # max_y = [-1,-2,-3,-4]
-        # count_arr = [0,0,0,0]
-        # for i in planning:
-        #     count+=1
-        #     name = i[0]
-        #     score = i[1]
-        #     center_x = i[2]
-        #     center_y = i[3]
-        #     w = i[4]
-        #     h = i[5]
-        #     depth_ = i[6]
-        #     world_x = i[7]
-        #     world_y = i[8]
-        #     # wh_ = w / h
-        #     # if self.wh_prev == 0:
-        #     #     self.wh_prev = wh_
-
-        #     if name == "tower" and score > 0.6 and (not self.trigger):
-        #         # self.trigger = False
-        #         # point_ = cal(pointxyz, trans, quat)
-        #         # if(abs(point_[0]) > 40 or abs(point_[1]) > 40 or abs(point_[2]) > 30):
-        #         #     point_ = trunc(point_, trans)
-        #         # self.pos_msg.position.x = point_[0]
-        #         # self.pos_msg.position.y = point_[1]
-        #         # self.pos_msg.position.z = point_[2]
-        #         # self.pose_msg.pose.position.x = point_[0]
-        #         # self.pose_msg.pose.position.y = point_[1]
-        #         # self.pose_msg.pose.position.z = point_[2]
-        #         if not self.triggertest:
-        #             if center_x < x/2 and self.tuning_msg.data != -1:
-        #                 self.tuning_msg.data = 1
-        #                 print("1")
-        #             elif center_x > x/2 and self.tuning_msg.data != 1:
-        #                 self.tuning_msg.data = -1
-        #                 print("2")
-        #             else:
-        #                 self.tuning_msg.data = 0
-        #                 print("3")
-        #             self.count+=1
-        #         if self.tuning_msg.data == 0 and self.count > 100:
-        #             self.triggertest = True
-        #             depth_ = self.MAX_Z
-        #             obj_pose.pose.pose.position.x = world_x * depth_ * scale
-        #             obj_pose.pose.pose.position.y = world_y * depth_ * scale
-        #             obj_pose.pose.pose.position.z =  depth_ * scale
-        #             pointxyz = [obj_pose.pose.pose.position.x, obj_pose.pose.pose.position.y, obj_pose.pose.pose.position.z]
-        #             # print(point,[world_x,world_y],pointxyz)
-        #             point_ = cal(pointxyz, trans, quat)
-        #             if(abs(point_[0]) > 40 or abs(point_[1]) > 40 or abs(point_[2]) > 30):
-        #                 point_ = trunc(point_, trans)
-        #             self.pos_msg.position.x = point_[0]
-        #             self.pos_msg.position.y = point_[1]
-        #             self.pos_msg.position.z = point_[2]
-        #             self.pose_msg.pose.position.x = point_[0]
-        #             self.pose_msg.pose.position.y = point_[1]
-        #             self.pose_msg.pose.position.z = point_[2]
-
-        #             self.pose_pub.publish(self.pose_msg)
-                
-        #     if name == "insulator" and obj_pose.score > 0.6:
-        #         if depth_ > 0 and depth_ < 8:
-        #            self.trigger = True 
-        #         a = min(max_x)
-        #         index = max_x.index(a)
-        #         if a < center_x:
-        #             max_x[index] = center_x
-        #             max_y[index] = center_y
-        #             count_arr[index] = count-1
-        
-        # # !-- 找到最终目标绝缘子
-        # max_yc = max_y.copy()
-        # sorted(max_yc)
-        # max_y1 = max_yc[-1]
-        # max_y2 = max_yc[-2]
-
-        # if max_x[max_y.index(max_y1)] < max_x[max_y.index(max_y2)]:
-        #     index_total = max_x.index(max_x[max_y.index(max_y1)])
-        # else:
-        #     index_total = max_x.index(max_x[max_y.index(max_y2)])
-            
-        # index_total = count_arr[index_total]
-
-        # insulator_des = planning[index_total]
-        # name = insulator_des[0]
-        # score = insulator_des[1]
-        # center_x = insulator_des[2]
-        # center_y = insulator_des[3]
-        # w = insulator_des[4]
-        # h = insulator_des[5]
-        # depth_ = insulator_des[6]
-        # world_x = insulator_des[7]
-        # world_y = insulator_des[8]
-
-
-        # # !-- 结束
-
-        # if self.trigger and depth_ > 0 and depth_ < 8 and depth_ < self.depth_min:
-        #     self.tri_msg.data = self.trigger
-        #     self.depth_min = depth_
-        #     print("==================")
-        #     print("===",depth_,depth_<8,self.depth_min,self.trigger)
-
-        #     obj_pose.pose.pose.position.x = world_x * depth_ * scale
-        #     obj_pose.pose.pose.position.y = world_y * depth_ * scale
-        #     obj_pose.pose.pose.position.z =  depth_ * scale
-        #     pointxyz = [obj_pose.pose.pose.position.x, obj_pose.pose.pose.position.y, obj_pose.pose.pose.position.z]
-
-        #     # 调整阶段偏转
-        #     wh_ = w / h
-        #     if self.wh_prev == 0:
-        #         self.wh_prev = wh_
-        #     cos_ = wh_ / self.wh_real
-        #     sin_ = math.sqrt(1 - cos_ * cos_)
-        #     # 左右偏转
-        #     # if wh_ < self.wh_prev and not self.flag:
-        #     #     self.flag = True
-        #     # if wh_ < self.wh_prev and self.flag:
-        #     #     self.flag = False
-        #     # if not self.flag: # 往右
-        #     #     pointxyz[0] = pointxyz[0] - sin_ * self.distance
-        #     # else : # 往左
-        #     #     pointxyz[0] = pointxyz[0] + sin_ * self.distance
-        #     pointxyz[0] = pointxyz[0] - sin_ * self.distance
-        #     pointxyz[2] = pointxyz[2] + cos_ * self.distance
-        #     point_ = cal(pointxyz, trans, quat)
-        #     self.pos_msg.position.x = point_[0]
-        #     self.pos_msg.position.y = point_[1]
-        #     self.pos_msg.position.z = point_[2]
-        #     self.pose_msg.pose.position.x = point_[0]
-        #     self.pose_msg.pose.position.y = point_[1]
-        #     self.pose_msg.pose.position.z = point_[2]
-        #     self.pose_msg.pose.position.x = 21.0
-        #     self.pose_msg.pose.position.y = 10.0
-        #     self.pose_msg.pose.position.z = 12.0
-
-        #     if self.trigger:
-        #         print(self.pose_msg.pose.position)
-        #         self.pose_pub.publish(self.pose_msg)
-        #         self.tri_pub.publish(self.tri_msg)
         
 
         time2 = rospy.Time.now()
         print("------coss " + str(time2.to_sec() - time1.to_sec()) + " s-------")
         # print("trigger: " + str(self.trigger))
+        self.error.data[1] = time2.to_sec() - time1.to_sec()
 
         self.img_pub.publish(self.bridge.cv2_to_imgmsg(image_detect, "bgr8"))
         self.res_pub.publish(self.result_msg)
         # self.pos_pub.publish(self.pos_msg)
         self.tuning_pub.publish(self.tuning_msg)
+        
         
         # if self.trigger:
         #     # print(self.pose_msg.pose.position)

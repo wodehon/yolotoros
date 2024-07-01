@@ -1,4 +1,4 @@
-#! /home/duan/anaconda3/envs/ros2yolo/bin/python3
+#! /usr/bin/python3
 # -*- coding: utf-8 -*-
 
 import cv2
@@ -13,8 +13,8 @@ from std_msgs.msg import Bool, Int8, Float32MultiArray
 import yaml
 import math
 
-import sys
-sys.path.remove('/opt/ros/melodic/lib/python2.7/dist-packages')
+# import sys
+# sys.path.remove('/opt/ros/melodic/lib/python2.7/dist-packages')
 import ctypes
 libgcc_s = ctypes.CDLL('libgcc_s.so.1')
 
@@ -28,7 +28,7 @@ from cv_tool import px2xy
 class yolo_detect():
     def __init__(self):
         self.bridge = CvBridge() #OpenCV与ROS的消息转换类
-        self.yolo = detect_test.detectapi(weights = '/home/duan/Code/test/src/yolotoros/scripts/best.pt')
+        self.yolo = detect_test.detectapi(weights = '/home/dev/code/yolov5_ros/src/scripts/best.pt')
         # self.im_sub = rospy.Subscriber('/camera/rgb/image_raw', Image, self.detectimg)
 
         # filters
@@ -58,7 +58,7 @@ class yolo_detect():
         # camera_info_topic = self.get_parameter('camera_info_topic').value
         # get camera info
         self.camera_info = {}
-        with open("/home/duan/Code/test/src/yolotoros/config/camera_info.yaml") as f:
+        with open("/home/dev/code/yolov5_ros/src/config/camera_info.yaml") as f:
             self.camera_info = yaml.full_load(f.read())
             print(self.camera_info['K'], self.camera_info['D'])
 
